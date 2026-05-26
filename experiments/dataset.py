@@ -108,7 +108,15 @@ class CelebASplitDataset(Dataset):
 
         self.cache = None
         if preload_to_memory:
-            self.cache = [self._load_tensor(path) for path, _ in self.samples]
+            print(
+                f"Preloading {len(self.samples)} {self.split} images into memory "
+                f"from {self.image_dir}..."
+            )
+            self.cache = []
+            for index, (path, _) in enumerate(self.samples, start=1):
+                self.cache.append(self._load_tensor(path))
+                if index % 5000 == 0 or index == len(self.samples):
+                    print(f"  cached {index}/{len(self.samples)} images")
 
     def __len__(self) -> int:
         return len(self.samples)

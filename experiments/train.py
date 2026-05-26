@@ -11,6 +11,7 @@ from typing import Dict, Iterable, Optional
 import numpy as np
 import torch
 from torch import nn, optim
+from tqdm.auto import tqdm
 from torchvision.utils import save_image
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -136,6 +137,23 @@ def append_csv_row(path: Path, fieldnames: Iterable[str], row: Dict[str, object]
         writer.writerow(row)
 
 
+class RunningMean:
+    """Small moving average helper for smoother progress-bar loss display."""
+
+    def __init__(self, momentum: float = 0.95) -> None:
+        self.momentum = momentum
+        self.value: Optional[float] = None
+
+    def update(self, new_value: Optional[float]) -> Optional[float]:
+        if new_value is None:
+            return self.value
+        if self.value is None:
+            self.value = new_value
+        else:
+            self.value = self.momentum * self.value + (1.0 - self.momentum) * new_value
+        return self.value
+
+
 def save_fixed_samples(
     generator: Generator,
     fixed_z: torch.Tensor,
@@ -191,7 +209,13 @@ def train(objective_name: str = OBJECTIVE) -> None:
     set_seed(cfg.seed, deterministic=cfg.deterministic)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Starting objective: {objective_name}")
+    print(f"Using device: {device}")
+    print(f"Image directory: {cfg.image_dir}")
+    print(f"Split file: {cfg.split_file}")
+    print(f"Epochs: {cfg.epochs}, batch size: {cfg.batch_size}")
     train_loader = build_dataloader("train", cfg=cfg, shuffle=True)
+    print(f"Training batches per epoch: {len(train_loader)}")
 
     generator = Generator(cfg.z_dim, cfg.image_channels).to(device)
     discriminator = Discriminator(cfg.image_channels).to(device)
@@ -236,8 +260,17 @@ def train(objective_name: str = OBJECTIVE) -> None:
     for epoch in range(1, cfg.epochs + 1):
         epoch_d_losses = []
         epoch_g_losses = []
+        d_running = RunningMean()
+        g_running = RunningMean()
 
-        for iteration, (real_images, _) in enumerate(train_loader, start=1):
+        epoch_loader = tqdm(
+            train_loader,
+            desc=f"{objective_name} epoch {epoch:03d}/{cfg.epochs}",
+            dynamic_ncols=True,
+            leave=True,
+        )
+
+        for iteration, (real_images, _) in enumerate(epoch_loader, start=1):
             real_images = real_images.to(device, non_blocking=True)
             batch_size = real_images.size(0)
 
@@ -283,6 +316,9 @@ def train(objective_name: str = OBJECTIVE) -> None:
 
             d_loss_value = float(d_loss.item())
             epoch_d_losses.append(d_loss_value)
+            d_smooth = d_running.update(d_loss_value)
+            g_smooth = g_running.update(g_loss_value)
+
             append_csv_row(
                 iter_log,
                 iter_fields,
@@ -295,6 +331,18 @@ def train(objective_name: str = OBJECTIVE) -> None:
                     "d_steps": d_steps,
                     "g_steps": g_steps,
                 },
+            )
+
+            g_display = "nan" if g_smooth is None else f"{g_smooth:.4f}"
+            epoch_loader.set_postfix(
+                {
+                    "D": f"{d_loss_value:.4f}",
+                    "G": "" if g_loss_value is None else f"{g_loss_value:.4f}",
+                    "D_avg": f"{d_smooth:.4f}",
+                    "G_avg": g_display,
+                    "D_steps": d_steps,
+                    "G_steps": g_steps,
+                }
             )
 
         mean_d_loss = float(np.mean(epoch_d_losses))
